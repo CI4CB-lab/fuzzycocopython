@@ -1,4 +1,4 @@
 [submodule "fuzzycoco"]
 	path = fuzzycoco
-	url = https://github.com/Lonza-RND-Data-Science/fuzzycoco.git
+	url = https://github.com/arthurbabey/fuzzycoco.git
 	branch = main
