@@ -217,9 +217,12 @@ def test_rules_stats_after_loading(tmp_path):
     assert not stats.empty
 
     # sampling rules_activations for a single sample is consistent with the matrix
+    # rules_activations returns only regular rules, while the matrix also includes
+    # default rules appended as extra columns
     single = model.rules_activations(X[0])
-    assert single.shape == (matrix.shape[1],)
-    np.testing.assert_allclose(single, matrix[0], rtol=1e-6, atol=1e-6)
+    n_regular = len(single)
+    assert n_regular <= matrix.shape[1]
+    np.testing.assert_allclose(single, matrix[0, :n_regular], rtol=1e-6, atol=1e-6)
 
 
 def test_describe_contains_fuzzy_system():
