@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -198,10 +200,29 @@ def test_rules_activations_and_stats():
     assert matrix.shape[0] == X.shape[0]
     assert matrix.shape[1] == stats.shape[0]
 
+
+def test_rules_stats_after_loading(tmp_path):
+    X, y_class, _ = _generate_dataset(seed=11)
+    model = FuzzyCocoClassifier(random_state=123)
+    model.fit(X, y_class)
+
+    path = tmp_path / "model.joblib"
+    model.save(path)
+
+    loaded = FuzzyCocoClassifier.load(path)
+    stats, matrix = loaded.rules_stat_activations(X, return_matrix=True)
+
+    assert stats.shape[0] == matrix.shape[1]
+    assert matrix.shape[0] == X.shape[0]
+    assert not stats.empty
+
     # sampling rules_activations for a single sample is consistent with the matrix
+    # rules_activations returns only regular rules, while the matrix also includes
+    # default rules appended as extra columns
     single = model.rules_activations(X[0])
-    assert single.shape == (matrix.shape[1],)
-    np.testing.assert_allclose(single, matrix[0], rtol=1e-6, atol=1e-6)
+    n_regular = len(single)
+    assert n_regular <= matrix.shape[1]
+    np.testing.assert_allclose(single, matrix[0, :n_regular], rtol=1e-6, atol=1e-6)
 
 
 def test_describe_contains_fuzzy_system():
@@ -244,6 +265,129 @@ def test_rules_stat_activations_empty_input_raises():
         clf.rules_stat_activations(empty)
 
 
+def test_rules_activations_exposes_default_rule_levels():
+    class DummyModel:
+        def __init__(self, values):
+            self._values = values
+
+        def rules_fire_from_values(self, sample):
+            return list(self._values)
+
+    description = {
+        "fuzzy_system": {
+            "variables": {
+                "input": {"feature": {"feature.low": 0.0}},
+                "output": {
+                    "target": {"target.low": 0.0, "target.high": 1.0},
+                    "other": {"other.low": -1.0, "other.high": 1.0},
+                },
+            },
+            "rules": {
+                "rule_1": {
+                    "antecedents": {"feature": {"feature.low": 1.0}},
+                    "consequents": {"target": {"target.high": 1.0}},
+                },
+                "rule_2": {
+                    "antecedents": {"feature": {"feature.low": 1.0}},
+                    "consequents": {"target": {"target.low": 0.0}},
+                },
+                "rule_3": {
+                    "antecedents": {"feature": {"feature.low": 1.0}},
+                    "consequents": {"other": {"other.high": 1.0}},
+                },
+            },
+            "default_rules": {"target": "target.low", "other": "other.low"},
+        }
+    }
+
+    clf = FuzzyCocoClassifier()
+    clf.description_ = copy.deepcopy(description)
+    clf._fuzzy_system_dict_ = copy.deepcopy(description["fuzzy_system"])
+    clf.feature_names_in_ = ["feature"]
+    clf.n_features_in_ = 1
+    clf.is_fitted_ = True
+    sentinel = np.finfo(np.float64).min
+    clf.model_ = DummyModel([0.25, 0.8, sentinel])
+
+    activations = clf.rules_activations([0.0])
+    assert isinstance(activations, np.ndarray)
+    assert activations.shape == (3,)
+    assert activations.default_rules == {
+        "target": pytest.approx(0.2),
+        "other": pytest.approx(0.0),
+    }
+
+
+def test_rules_activations_uses_description_mapping_for_defaults():
+    class DummyModel:
+        def __init__(self, values):
+            self._values = values
+
+        def rules_fire_from_values(self, sample):
+            return list(self._values)
+
+    clf = FuzzyCocoClassifier()
+    description = _sample_description_single_output()
+    _prime_model_with_description(clf, description)
+    clf.feature_names_in_ = ["feature1"]
+    clf.n_features_in_ = 1
+    clf.is_fitted_ = True
+    clf.model_ = DummyModel([0.4])
+
+    activations = clf.rules_activations([0.1])
+    assert activations.default_rules == {"target": pytest.approx(0.6)}
+
+
+def test_rules_stat_activations_matrix_carries_default_rules():
+    class DummyModel:
+        def rules_fire_from_values(self, sample):
+            value = float(sample[0])
+            return [value, 1.0 - value]
+
+    description = {
+        "fuzzy_system": {
+            "variables": {
+                "input": {"feature": {"feature.low": 0.0, "feature.high": 1.0}},
+                "output": {"target": {"target.low": 0.0, "target.high": 1.0}},
+            },
+            "rules": {
+                "rule_1": {
+                    "antecedents": {"feature": {"feature.low": 1.0}},
+                    "consequents": {"target": {"target.high": 1.0}},
+                },
+                "rule_2": {
+                    "antecedents": {"feature": {"feature.high": 1.0}},
+                    "consequents": {"target": {"target.low": 0.0}},
+                },
+            },
+            "default_rules": {"target": "target.low"},
+        }
+    }
+
+    clf = FuzzyCocoClassifier()
+    clf.description_ = copy.deepcopy(description)
+    clf._fuzzy_system_dict_ = copy.deepcopy(description["fuzzy_system"])
+    clf.is_fitted_ = True
+    clf.model_ = DummyModel()
+    clf.feature_names_in_ = ["feature"]
+    clf.n_features_in_ = 1
+    clf.rules_ = ["rule_1", "rule_2"]
+
+    X = np.array([[0.2], [0.8]])
+    stats, matrix = clf.rules_stat_activations(X, return_matrix=True, sort_by_impact=False)
+
+    assert stats.shape[0] == matrix.shape[1]
+    assert isinstance(matrix, np.ndarray)
+    assert hasattr(matrix, "default_rules")
+    assert matrix.default_rules is not None
+    assert len(matrix.default_rules) == 2
+    assert matrix.default_rules[0]["target"] == pytest.approx(0.2)
+    assert matrix.default_rules[1]["target"] == pytest.approx(0.2)
+    assert "ELSE target is Low" in stats.index
+    default_row = stats.loc["ELSE target is Low"]
+    assert pytest.approx(default_row["mean"], rel=1e-6) == 0.2
+
+
 def test_classifier_load_type_guard(tmp_path):
     X, _, y_reg = _generate_dataset(seed=17)
     reg = FuzzyCocoRegressor(random_state=2)
@@ -263,3 +407,121 @@ def test_regressor_custom_scoring():
 
     score = _FuzzyCocoBase.score(reg, X, y_reg, scoring="neg_mean_squared_error")
     assert isinstance(score, float)
+
+
+def _sample_description_single_output():
+    return {
+        "fuzzy_system": {
+            "variables": {
+                "input": {"feature1": {"feature1.low": 0.0, "feature1.high": 1.0}},
+                "output": {"target": {"target.low": 0.0, "target.high": 1.0}},
+            },
+            "rules": {
+                "rule_1": {
+                    "antecedents": {"feature1": {"feature1.low": 1.0}},
+                    "consequents": {"target": {"target.high": 1.0}},
+                }
+            },
+            "default_rules": {"target": "target.low"},
+        },
+        "defuzz_thresholds": {"target": 0.4},
+    }
+
+
+def _sample_description_multi_output():
+    return {
+        "fuzzy_system": {
+            "variables": {
+                "input": {
+                    "feature1": {"feature1.low": 0.0, "feature1.high": 1.0},
+                },
+                "output": {
+                    "target": {"target.low": 0.0, "target.high": 1.0},
+                    "other": {"other.low": -1.0, "other.high": 2.0},
+                },
+            },
+            "rules": {
+                "rule_1": {
+                    "antecedents": {"feature1": {"feature1.low": 1.0}},
+                    "consequents": {
+                        "target": {"target.high": 1.0},
+                        "other": {"other.low": 0.5},
+                    },
+                }
+            },
+            "default_rules": {"target": "target.low", "other": "other.high"},
+        },
+        "defuzz_thresholds": {"target": 0.5, "other": 0.7},
+    }
+
+
+def _prime_model_with_description(model, description):
+    model.description_ = copy.deepcopy(description)
+    model.is_fitted_ = True
+    outputs = list(description["fuzzy_system"]["variables"]["output"].keys())
+    model.target_name_in_ = outputs[0]
+    model.target_names_in_ = outputs
+    model.n_outputs_ = len(outputs)
+    model._fuzzy_system_dict_ = copy.deepcopy(description["fuzzy_system"])
+
+
+def test_set_target_names_single_output():
+    model = FuzzyCocoRegressor()
+    description = _sample_description_single_output()
+    _prime_model_with_description(model, description)
+
+    model.set_target_names("Outcome")
+
+    assert model.target_name_in_ == "Outcome"
+    assert model.target_names_in_ == ["Outcome"]
+    outputs = model.description_["fuzzy_system"]["variables"]["output"]
+    assert list(outputs.keys()) == ["Outcome"]
+    assert set(outputs["Outcome"].keys()) == {"Outcome.low", "Outcome.high"}
+    consequents = model.description_["fuzzy_system"]["rules"]["rule_1"]["consequents"]
+    assert list(consequents.keys()) == ["Outcome"]
+    assert set(consequents["Outcome"].keys()) == {"Outcome.high"}
+    defaults = model.description_["fuzzy_system"]["default_rules"]
+    assert defaults == {"Outcome": "Outcome.low"}
+    thresholds = model.description_["defuzz_thresholds"]
+    assert thresholds == {"Outcome": 0.4}
+
+
+def test_set_target_names_multi_sequence():
+    model = FuzzyCocoRegressor()
+    description = _sample_description_multi_output()
+    _prime_model_with_description(model, description)
+
+    model.set_target_names(["T", "O"])
+
+    assert model.target_name_in_ == "T"
+    assert model.target_names_in_ == ["T", "O"]
+    outputs = model.description_["fuzzy_system"]["variables"]["output"]
+    assert list(outputs.keys()) == ["T", "O"]
+    assert "T.high" in outputs["T"]
+    assert "O.low" in outputs["O"]
+    rule = model.description_["fuzzy_system"]["rules"]["rule_1"]["consequents"]
+    assert set(rule.keys()) == {"T", "O"}
+    assert set(rule["T"].keys()) == {"T.high"}
+    assert set(rule["O"].keys()) == {"O.low"}
+    defaults = model.description_["fuzzy_system"]["default_rules"]
+    assert defaults == {"T": "T.low", "O": "O.high"}
+    thresholds = model.description_["defuzz_thresholds"]
+    assert thresholds == {"T": 0.5, "O": 0.7}
+
+
+def test_set_target_names_duplicate_raises():
+    model = FuzzyCocoRegressor()
+    description = _sample_description_multi_output()
+    _prime_model_with_description(model, description)
+
+    with pytest.raises(ValueError, match="unique"):
+        model.set_target_names({"target": "other"})
+
+
+def test_set_target_names_whitespace_raises():
+    model = FuzzyCocoRegressor()
+    description = _sample_description_single_output()
+    _prime_model_with_description(model, description)
+
+    with pytest.raises(ValueError, match="must not contain"):
+        model.set_target_names("Bad Name")

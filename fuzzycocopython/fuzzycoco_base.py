@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 
 import joblib
 import numpy as np
@@ -15,11 +17,53 @@ from ._fuzzycoco_core import DataFrame, FuzzyCoco, FuzzyCocoParams, FuzzySystem,
 from .fuzzycoco_plot_mixin import FuzzyCocoPlotMixin
 from .utils import (
     build_fuzzycoco_params,
+    generate_generic_labels,
     parse_fuzzy_system_from_description,
     to_linguistic_components,
     to_tables_components,
     to_views_components,
 )
+
+_MISSING_DATA_DOUBLE = np.finfo(np.float64).min
+
+
+@dataclass(frozen=True)
+class FitStepInfo:
+    """Snapshot of one training generation."""
+
+    generation: int
+    fitness: float
+    history: Sequence[float]
+    model: FuzzyCoco
+    estimator: _FuzzyCocoBase
+
+
+class RuleActivations(np.ndarray):
+    """NumPy array of rule fire levels carrying default rule activations as metadata."""
+
+    def __new__(cls, activations, default_rules=None):
+        obj = np.asarray(activations, dtype=float).view(cls)
+        obj.default_rules = None if not default_rules else dict(default_rules)
+        return obj
+
+    def __array_finalize__(self, parent):
+        if parent is None:
+            return
+        self.default_rules = getattr(parent, "default_rules", None)
+
+
+class RuleActivationMatrix(np.ndarray):
+    """Activation matrix storing per-sample default rule metadata."""
+
+    def __new__(cls, matrix, default_rules=None):
+        obj = np.asarray(matrix, dtype=float).view(cls)
+        obj.default_rules = None if default_rules is None else tuple(default_rules)
+        return obj
+
+    def __array_finalize__(self, parent):
+        if parent is None:
+            return
+        self.default_rules = getattr(parent, "default_rules", None)
 
 
 def save_model(model, filepath, *, compress=3):
@@ -198,6 +242,165 @@ class _FuzzyCocoBase(BaseEstimator):
         rng = check_random_state(self.random_state)
         return int(rng.randint(0, 2**32 - 1, dtype=np.uint32))
 
+    def _extract_output_names(self):
+        """Return output variable names from the stored description."""
+        fuzzy_desc = getattr(self, "description_", None)
+        if not fuzzy_desc:
+            return []
+        variables = fuzzy_desc.get("fuzzy_system", {}).get("variables", {})
+        outputs = variables.get("output", {})
+        return list(outputs.keys())
+
+    @staticmethod
+    def _rename_membership_label(label, old_var, new_var):
+        """Rename membership labels carrying the old variable prefix."""
+        if not isinstance(label, str):
+            return label
+        if label == old_var:
+            return new_var
+        for sep in (".", "_", "-", " "):
+            prefix = f"{old_var}{sep}"
+            if label.startswith(prefix):
+                return f"{new_var}{sep}{label[len(prefix):]}"
+        return label
+
+    def _rebuild_from_description(self):
+        """Refresh cached Python helpers and fuzzy system from description."""
+        parsed = parse_fuzzy_system_from_description(self.description_)
+        self.variables_, self.rules_, self.default_rules_ = to_linguistic_components(*parsed)
+        self.variables_view_, self.rules_view_, self.default_rules_view_ = to_views_components(*parsed)
+        self.variables_df_, self.rules_df_ = to_tables_components(*parsed)
+
+        output_names = self._extract_output_names()
+        self.target_names_in_ = output_names
+        if output_names:
+            self.target_name_in_ = output_names[0]
+        self.n_outputs_ = len(output_names)
+
+        fuzzy_desc = self.description_.get("fuzzy_system") if self.description_ else None
+        self._fuzzy_system_dict_ = copy.deepcopy(fuzzy_desc) if fuzzy_desc is not None else None
+        self._fuzzy_system_string_ = None
+        self._fuzzy_system_ = None
+        try:
+            self._ensure_fuzzy_system()
+        except ModuleNotFoundError:  # pragma: no cover - happens in partial installs
+            pass
+        except AttributeError:  # pragma: no cover - defensive for missing bindings
+            pass
+
+        # Drop the live engine; predictions fall back to the serialized description.
+        self.model_ = None
+
+    def _normalize_target_name_change(self, names):
+        """Normalize provided names into a mapping old->new."""
+        current = list(getattr(self, "target_names_in_", []) or self._extract_output_names())
+        if not current:
+            raise RuntimeError("Estimator does not expose any output variables to rename.")
+
+        if isinstance(names, str):
+            if len(current) != 1:
+                raise ValueError("Provide a mapping or list when renaming multi-output models.")
+            mapping = {current[0]: str(names)}
+        elif isinstance(names, Mapping):
+            mapping = {str(k): str(v) for k, v in names.items()}
+            unknown = sorted(set(mapping) - set(current))
+            if unknown:
+                raise ValueError(f"Unknown output variables: {', '.join(unknown)}")
+        elif isinstance(names, Sequence):
+            new_names = [str(n) for n in names]
+            if len(new_names) != len(current):
+                raise ValueError(
+                    f"Expected {len(current)} output names, got {len(new_names)}.",
+                )
+            mapping = {old: new for old, new in zip(current, new_names, strict=False)}
+        else:
+            raise TypeError("`names` must be a string, sequence, or mapping.")
+
+        normalized = {old: new for old, new in mapping.items() if new and new != old}
+        updated = [normalized.get(name, name) for name in current]
+        if len(updated) != len(set(updated)):
+            raise ValueError("Output names must be unique.")
+        return normalized
+
+    def set_target_names(self, names):
+        """Rename the output variables and refresh cached structures.
+
+        Args:
+            names: String (single-output), sequence of strings matching the number
+                of outputs, or a mapping ``{old_name: new_name}``.
+
+        Returns:
+            self
+        """
+        check_is_fitted(self, attributes=["description_", "is_fitted_"])
+        mapping = self._normalize_target_name_change(names)
+        invalid = [target for target in mapping.values() if any(char.isspace() for char in target)]
+        if invalid:
+            raise ValueError(
+                "Output variable names must not contain spaces: " + ", ".join(invalid),
+            )
+        if not mapping:
+            return self
+
+        fs = self.description_.get("fuzzy_system")
+        if fs is None:
+            raise RuntimeError("Estimator is missing the fuzzy system description.")
+
+        variables = fs.get("variables", {})
+        outputs = variables.get("output", {})
+        if not outputs:
+            raise RuntimeError("Estimator description lacks fuzzy output variables.")
+
+        new_outputs = {}
+        for var_name, sets in outputs.items():
+            target_name = mapping.get(var_name, var_name)
+            renamed_sets = {}
+            for set_name, value in sets.items():
+                renamed_sets[self._rename_membership_label(set_name, var_name, target_name)] = value
+            new_outputs[target_name] = renamed_sets
+        variables["output"] = new_outputs
+
+        rules = fs.get("rules", {})
+        new_rules = {}
+        for rule_name, rule_def in rules.items():
+            updated_rule = {}
+            for key, part in rule_def.items():
+                if key not in ("antecedents", "consequents") or not isinstance(part, dict):
+                    updated_rule[key] = part
+                    continue
+                changed_part = {}
+                for var, mf_dict in part.items():
+                    renamed_var = mapping.get(var, var)
+                    if isinstance(mf_dict, dict):
+                        renamed_mf = {
+                            self._rename_membership_label(label, var, renamed_var): weight
+                            for label, weight in mf_dict.items()
+                        }
+                    else:
+                        renamed_mf = mf_dict
+                    changed_part[renamed_var] = renamed_mf
+                updated_rule[key] = changed_part
+            new_rules[rule_name] = updated_rule
+        fs["rules"] = new_rules
+
+        defaults = fs.get("default_rules", {})
+        new_defaults = {}
+        for var, label in defaults.items():
+            renamed_var = mapping.get(var, var)
+            new_defaults[renamed_var] = self._rename_membership_label(label, var, renamed_var)
+        fs["default_rules"] = new_defaults
+
+        thresholds = self.description_.get("defuzz_thresholds")
+        if isinstance(thresholds, dict):
+            new_thresholds = {}
+            for var, value in thresholds.items():
+                renamed_var = mapping.get(var, var)
+                new_thresholds[renamed_var] = value
+            self.description_["defuzz_thresholds"] = new_thresholds
+
+        self._rebuild_from_description()
+        return self
+
     def _make_dataframe(self, arr, header):
         """Build the C++ DataFrame from a 2D numpy array and header labels."""
         rows = [list(header)] + arr.astype(str).tolist()
@@ -319,6 +522,117 @@ class _FuzzyCocoBase(BaseEstimator):
         self._fuzzy_system_ = FuzzySystem.load_from_string(serialized)
         return self._fuzzy_system_
 
+    def _fuzzy_system_description(self):
+        """Return the fuzzy system section of the saved description (cached)."""
+        desc = getattr(self, "_fuzzy_system_dict_", None)
+        if isinstance(desc, Mapping):
+            return desc
+
+        root = getattr(self, "description_", None)
+        if isinstance(root, Mapping):
+            fs = root.get("fuzzy_system")
+            if isinstance(fs, Mapping):
+                self._fuzzy_system_dict_ = copy.deepcopy(fs)
+                return self._fuzzy_system_dict_
+        return None
+
+    def _default_rule_names(self):
+        """Return the ordered list of default rule names defined in the system."""
+        desc = self._fuzzy_system_description()
+        if isinstance(desc, Mapping):
+            defaults = desc.get("default_rules")
+            if isinstance(defaults, Mapping):
+                return list(defaults.keys())
+        return []
+
+    def _default_rule_labels(self):
+        """Human-readable labels for default rules, aligned with _default_rule_names."""
+        names = self._default_rule_names()
+        if not names:
+            return []
+
+        desc = self._fuzzy_system_description()
+        defaults = desc.get("default_rules") if isinstance(desc, Mapping) else None
+        variables = desc.get("variables", {}) if isinstance(desc, Mapping) else {}
+        outputs = variables.get("output", {}) if isinstance(variables, Mapping) else {}
+
+        label_lookup: dict[str, dict[str, str]] = {}
+        for var, sets in outputs.items():
+            if not isinstance(sets, Mapping):
+                continue
+            items = sorted(sets.items(), key=lambda kv: kv[1])
+            labels = generate_generic_labels(len(items))
+            var_map = label_lookup.setdefault(var, {})
+            for (orig_set, _pos), label in zip(items, labels, strict=False):
+                var_map[orig_set] = label
+
+        labels: list[str] = []
+        for name in names:
+            pretty = None
+            if isinstance(defaults, Mapping):
+                set_key = defaults.get(name)
+                if isinstance(set_key, str):
+                    pretty = label_lookup.get(name, {}).get(set_key)
+                    if pretty is None:
+                        suffix = set_key.split(".")[-1] if "." in set_key else set_key
+                        suffix = suffix.replace("_", " ").strip()
+                        if suffix:
+                            pretty = suffix.title()
+                    if pretty:
+                        pretty = f"ELSE {name} is {pretty}"
+            labels.append(pretty or f"default_{name}")
+        return labels
+
+    def _default_rule_activations_from_levels(self, rule_levels):
+        """Compute default rule fallbacks based solely on rule fire levels."""
+        desc = self._fuzzy_system_description()
+        if not isinstance(desc, Mapping):
+            return None
+
+        defaults = desc.get("default_rules")
+        rules_desc = desc.get("rules")
+        if not isinstance(defaults, Mapping) or not isinstance(rules_desc, Mapping):
+            return None
+
+        default_names = list(defaults.keys())
+        if not default_names:
+            return None
+
+        rule_outputs: list[tuple[str, ...]] = []
+        for rule_def in rules_desc.values():
+            if isinstance(rule_def, Mapping):
+                consequents = rule_def.get("consequents")
+                if isinstance(consequents, Mapping):
+                    rule_outputs.append(tuple(consequents.keys()))
+                else:
+                    rule_outputs.append(tuple())
+            else:
+                rule_outputs.append(tuple())
+
+        if len(rule_outputs) != len(rule_levels):
+            return None
+
+        max_fire_by_var = {name: None for name in default_names}
+        for fire_level, targets in zip(rule_levels.tolist(), rule_outputs, strict=False):
+            if not np.isfinite(fire_level) or fire_level <= _MISSING_DATA_DOUBLE:
+                continue
+            for var in targets:
+                if var not in max_fire_by_var:
+                    continue
+                current = max_fire_by_var[var]
+                if current is None or fire_level > current:
+                    max_fire_by_var[var] = float(fire_level)
+
+        result: dict[str, float] = {}
+        for name in default_names:
+            max_fire = max_fire_by_var[name]
+            if max_fire is None:
+                result[name] = 0.0
+            else:
+                clipped = float(np.clip(max_fire, 0.0, 1.0))
+                result[name] = max(0.0, 1.0 - clipped)
+        return result
+
     def _predict_dataframe(self, dfin):
         """Predict using the live engine when available, else via saved description."""
         model = getattr(self, "model_", None)
@@ -330,6 +644,12 @@ class _FuzzyCocoBase(BaseEstimator):
             raise RuntimeError("Missing model description for prediction")
         return _fuzzycoco_core.FuzzyCoco.load_and_predict_from_dict(dfin, self.description_)
 
+    def _rule_activations_from_sample_values(self, sample_values):
+        """Compute RuleActivations for a validated 1D list of floats."""
+        values = self._compute_rule_fire_levels(sample_values)
+        default_map = self._default_rule_activations_from_levels(values)
+        return RuleActivations(values, default_map)
+
     def _compute_rule_fire_levels(self, sample):
         """Compute rule activations for a single sample (1D)."""
         model = getattr(self, "model_", None)
@@ -338,9 +658,22 @@ class _FuzzyCocoBase(BaseEstimator):
         else:
             from . import _fuzzycoco_core
 
-            mapping = {name: float(value) for name, value in zip(self.feature_names_in_, sample, strict=False)}
-            values = _fuzzycoco_core._rules_fire_from_description(self.description_, mapping)
+            values_matrix = _fuzzycoco_core._rules_fire_matrix_from_description(
+                self.description_,
+                [sample],
+            )
+            values = values_matrix[0]
         return np.asarray(values, dtype=float)
+
+    def _validate_fit_kwargs(self, fit_params):
+        params = dict(fit_params)
+        feature_names = params.pop("feature_names", None)
+        target_name = params.pop("target_name", None)
+        params.pop("output_filename", None)
+        if params:
+            unexpected = ", ".join(sorted(params))
+            raise TypeError(f"Unexpected fit parameters: {unexpected}")
+        return feature_names, target_name
 
     # ──────────────────────────────────────────────────────────────────────
     # public API
@@ -358,13 +691,63 @@ class _FuzzyCocoBase(BaseEstimator):
         Returns:
             The fitted estimator instance.
         """
-        feature_names = fit_params.pop("feature_names", None)
-        target_name = fit_params.pop("target_name", None)
-        fit_params.pop("output_filename", None)  # backward compat, no-op
-        if fit_params:
-            unexpected = ", ".join(sorted(fit_params))
-            raise TypeError(f"Unexpected fit parameters: {unexpected}")
+        feature_names, target_name = self._validate_fit_kwargs(fit_params)
+        return self._fit_internal(
+            X,
+            y,
+            feature_names=feature_names,
+            target_name=target_name,
+            callback=None,
+            max_generations=None,
+            max_fitness=None,
+            influence=None,
+            evolving_ratio=None,
+        )
 
+    def fit_stepwise(
+        self,
+        X,
+        y,
+        *,
+        callback: Callable[[FitStepInfo], object] | None = None,
+        max_generations: int | None = None,
+        max_fitness: float | None = None,
+        influence: bool | None = None,
+        evolving_ratio: float | None = None,
+        **fit_params,
+    ):
+        """Fit while exposing each training generation to a callback.
+
+        The provided ``callback`` receives a :class:`FitStepInfo` instance
+        after every generation. Returning ``False`` from the callback stops
+        the evolution early; any other return value continues the loop.
+        """
+        feature_names, target_name = self._validate_fit_kwargs(fit_params)
+        return self._fit_internal(
+            X,
+            y,
+            feature_names=feature_names,
+            target_name=target_name,
+            callback=callback,
+            max_generations=max_generations,
+            max_fitness=max_fitness,
+            influence=influence,
+            evolving_ratio=evolving_ratio,
+        )
+
+    def _fit_internal(
+        self,
+        X,
+        y,
+        *,
+        feature_names,
+        target_name,
+        callback,
+        max_generations,
+        max_fitness,
+        influence,
+        evolving_ratio,
+    ):
         X_arr, y_arr = check_X_y(
             X,
             y,
@@ -381,6 +764,7 @@ class _FuzzyCocoBase(BaseEstimator):
         y_2d = y_arr.reshape(-1, 1) if y_arr.ndim == 1 else y_arr
         y_headers, resolved_target = self._resolve_target_headers(y, y_2d, target_name)
         self.target_name_in_ = resolved_target
+        self.target_names_in_ = list(y_headers)
         self.n_outputs_ = y_2d.shape[1]
 
         metrics_weights = self.metrics_weights
@@ -427,13 +811,90 @@ class _FuzzyCocoBase(BaseEstimator):
         dfin, dfout = self._prepare_dataframes(X_arr, y_2d, y_headers=y_headers)
         rng = RandomGenerator(self._resolve_seed())
         self.model_ = FuzzyCoco(dfin, dfout, params_obj, rng)
-        self.model_.run()
+        self._fitness_trace = []
+
+        self._run_training_loop(
+            callback=callback,
+            max_generations=max_generations,
+            max_fitness=max_fitness,
+            influence=influence,
+            evolving_ratio=evolving_ratio,
+        )
+
+        self._finalize_after_training()
+        return self
+
+    def _run_training_loop(
+        self,
+        *,
+        callback: Callable[[FitStepInfo], object] | None,
+        max_generations: int | None,
+        max_fitness: float | None,
+        influence: bool | None,
+        evolving_ratio: float | None,
+    ):
+        if self.model_ is None:
+            raise RuntimeError("Training model has not been initialised")
+        if not hasattr(self, "_fuzzy_params_") or self._fuzzy_params_ is None:
+            raise RuntimeError("Missing FuzzyCoco parameters; call fit first")
+
+        global_params = self._fuzzy_params_.global_params
+
+        total_generations = global_params.max_generations if max_generations is None else max_generations
+        if total_generations is None:
+            total_generations = 0
+        total_generations = int(total_generations)
+        if total_generations < 0:
+            raise ValueError("max_generations must be non-negative")
+
+        target_fitness = global_params.max_fitness if max_fitness is None else max_fitness
+        if target_fitness is None:
+            target_fitness = float("inf")
+        else:
+            target_fitness = float(target_fitness)
+
+        influence_flag = global_params.influence_rules_initial_population if influence is None else bool(influence)
+        evolving_ratio_value = (
+            global_params.influence_evolving_ratio if evolving_ratio is None else float(evolving_ratio)
+        )
+
+        model = self.model_
+        model.init(influence=influence_flag, evolving_ratio=evolving_ratio_value)
+
+        if total_generations == 0:
+            return
+
+        for _ in range(total_generations):
+            fitness = float(model.step())
+            generation = int(model.current_generation())
+            self._fitness_trace.append(fitness)
+
+            if callback is not None:
+                step_info = FitStepInfo(
+                    generation=generation,
+                    fitness=fitness,
+                    history=tuple(self._fitness_trace),
+                    model=model,
+                    estimator=self,
+                )
+                should_continue = callback(step_info)
+                if should_continue is False:
+                    break
+
+            if np.isfinite(target_fitness) and fitness >= target_fitness:
+                break
+
+    def _finalize_after_training(self):
+        if self.model_ is None:
+            raise RuntimeError("Training model has not been initialised")
+
         self.model_.select_best()
         self.description_ = self.model_.describe()
 
         fuzzy_system_desc = self.description_.get("fuzzy_system")
         if fuzzy_system_desc is None:
             raise RuntimeError("Model description missing 'fuzzy_system' section")
+
         self._fuzzy_system_dict_ = copy.deepcopy(fuzzy_system_desc)
         self._fuzzy_system_string_ = self.model_.serialize_fuzzy_system()
         self._fuzzy_system_ = FuzzySystem.load_from_string(self._fuzzy_system_string_)
@@ -443,8 +904,10 @@ class _FuzzyCocoBase(BaseEstimator):
         self.variables_view_, self.rules_view_, self.default_rules_view_ = to_views_components(*parsed)
         self.variables_df_, self.rules_df_ = to_tables_components(*parsed)
 
+        self.fitness_history_ = np.asarray(self._fitness_trace, dtype=float)
+        self.n_generations_run_ = int(self.model_.current_generation())
+
         self.is_fitted_ = True
-        return self
 
     def predict(self, X):
         """Predict outputs for ``X``.
@@ -481,7 +944,10 @@ class _FuzzyCocoBase(BaseEstimator):
             X: Single sample as 1D array-like, pandas Series, or single-row DataFrame.
 
         Returns:
-            1D numpy array of length ``n_rules`` with activation strengths in [0, 1].
+            1D numpy array (``RuleActivations``) of length ``n_rules`` with fire levels
+            in [0, 1]. The array exposes a ``default_rules`` attribute containing a
+            dict mapping each default rule (one per output variable) to its computed
+            fallback activation.
         """
         check_is_fitted(self, attributes=["model_"])
         sample = self._as_1d_sample(X)
@@ -489,7 +955,7 @@ class _FuzzyCocoBase(BaseEstimator):
             raise ValueError(
                 f"Expected {self.n_features_in_} features, got {len(sample)}",
             )
-        return self._compute_rule_fire_levels(sample)
+        return self._rule_activations_from_sample_values(sample)
 
     def rules_stat_activations(self, X, threshold=1e-12, return_matrix=False, sort_by_impact=True):
         """Compute aggregate rule activations for a batch of samples.
@@ -503,7 +969,9 @@ class _FuzzyCocoBase(BaseEstimator):
         Returns:
             If ``return_matrix`` is False, a pandas DataFrame with per-rule statistics
             (mean, std, min, max, usage rates, and impact). If True, returns a tuple
-            ``(stats_df, activations_matrix)``.
+            ``(stats_df, activations_matrix)`` where ``activations_matrix`` is a
+            ``RuleActivationMatrix`` carrying a ``default_rules`` attribute that stores,
+            for each sample, a dict of fallback activations for the default rules.
         """
 
         check_is_fitted(self, attributes=["model_"])
@@ -527,29 +995,69 @@ class _FuzzyCocoBase(BaseEstimator):
                 f"Expected {self.n_features_in_} features, got {arr.shape[1]}",
             )
 
-        activations = np.vstack([self._compute_rule_fire_levels(row.astype(float).tolist()) for row in arr])
+        activation_rows = []
+        default_rows = []
+        has_default_payload = False
+        for row in arr:
+            sample_values = row.astype(float).tolist()
+            values = self._rule_activations_from_sample_values(sample_values)
+            activation_rows.append(np.asarray(values, dtype=float))
+            default_rows.append(values.default_rules)
+            has_default_payload |= values.default_rules is not None
 
-        sums = activations.sum(axis=1, keepdims=True)
-        share = np.divide(activations, sums, out=np.zeros_like(activations), where=sums > 0)
+        activations_matrix = np.vstack(activation_rows)
+        default_payload = tuple(default_rows) if has_default_payload else None
 
-        usage_rate = (activations >= threshold).mean(axis=0)
+        default_matrix = None
+        default_names = self._default_rule_names() if has_default_payload else []
+        default_labels = self._default_rule_labels() if has_default_payload else []
+        if has_default_payload and default_names:
+            default_matrix = np.zeros((activations_matrix.shape[0], len(default_names)), dtype=float)
+            for sample_idx, payload in enumerate(default_rows):
+                if payload is None:
+                    continue
+                for name_idx, name in enumerate(default_names):
+                    value = payload.get(name)
+                    if value is None:
+                        continue
+                    default_matrix[sample_idx, name_idx] = float(value)
+
+        if default_matrix is not None and default_names:
+            combined_matrix = np.hstack([activations_matrix, default_matrix])
+            default_idx_labels = default_labels or [f"default_{name}" for name in default_names]
+            matrix_labels = self._rules_index(activations_matrix.shape[1]) + default_idx_labels
+        else:
+            combined_matrix = activations_matrix
+            matrix_labels = self._rules_index(combined_matrix.shape[1])
+
+        activations = RuleActivationMatrix(combined_matrix, default_payload)
+        activations_view = np.asarray(activations)
+
+        sums = activations_view.sum(axis=1, keepdims=True)
+        share = np.divide(
+            activations_view,
+            sums,
+            out=np.zeros_like(activations_view),
+            where=sums > 0,
+        )
+
+        usage_rate = (activations_view >= threshold).mean(axis=0)
         usage_rate_pct = 100.0 * usage_rate
         importance_pct = 100.0 * share.mean(axis=0)
         impact_pct = usage_rate * importance_pct
 
-        idx = self._rules_index(activations.shape[1])
         stats = pd.DataFrame(
             {
-                "mean": activations.mean(axis=0),
-                "std": activations.std(axis=0),
-                "min": activations.min(axis=0),
-                "max": activations.max(axis=0),
+                "mean": activations_view.mean(axis=0),
+                "std": activations_view.std(axis=0),
+                "min": activations_view.min(axis=0),
+                "max": activations_view.max(axis=0),
                 "usage_rate": usage_rate,
                 "usage_rate_pct": usage_rate_pct,
                 "importance_pct": importance_pct,
                 "impact_pct": impact_pct,
             },
-            index=idx,
+            index=matrix_labels,
         )
 
         if sort_by_impact:
@@ -612,6 +1120,15 @@ class _FuzzyCocoBase(BaseEstimator):
         if isinstance(params, dict):
             state["_fuzzy_params_"] = FuzzyCocoParams.from_dict(params)
         self.__dict__.update(state)
+
+        output_names = []
+        if getattr(self, "description_", None):
+            output_names = self._extract_output_names()
+        if not getattr(self, "target_names_in_", None):
+            self.target_names_in_ = output_names
+        if output_names and not getattr(self, "target_name_in_", None):
+            self.target_name_in_ = output_names[0]
+
         self.model_ = None
         self._fuzzy_system_ = None
         if getattr(self, "_fuzzy_system_dict_", None) is None and getattr(self, "description_", None):
@@ -678,6 +1195,34 @@ class FuzzyCocoClassifier(ClassifierMixin, FuzzyCocoPlotMixin, _FuzzyCocoBase):
         else:
             self.classes_ = [np.unique(y_arr[:, i]) for i in range(y_arr.shape[1])]
         return super().fit(X, y, **kwargs)
+
+    def fit_stepwise(
+        self,
+        X,
+        y,
+        *,
+        callback=None,
+        max_generations=None,
+        max_fitness=None,
+        influence=None,
+        evolving_ratio=None,
+        **fit_params,
+    ):
+        y_arr = np.asarray(y)
+        if y_arr.ndim == 1:
+            self.classes_ = np.unique(y_arr)
+        else:
+            self.classes_ = [np.unique(y_arr[:, i]) for i in range(y_arr.shape[1])]
+        return super().fit_stepwise(
+            X,
+            y,
+            callback=callback,
+            max_generations=max_generations,
+            max_fitness=max_fitness,
+            influence=influence,
+            evolving_ratio=evolving_ratio,
+            **fit_params,
+        )
 
     def predict(self, X):
         """Predict class labels for ``X``.
