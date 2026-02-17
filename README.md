@@ -1,16 +1,16 @@
 # FuzzyCocoPython
 
-[![Tests](https://github.com/Lonza-RND-Data-Science/fuzzycocopython/actions/workflows/tests.yml/badge.svg)](https://github.com/Lonza-RND-Data-Science/fuzzycocopython/actions/workflows/tests.yml)
-[![Build](https://github.com/Lonza-RND-Data-Science/fuzzycocopython/actions/workflows/build.yml/badge.svg)](https://github.com/Lonza-RND-Data-Science/fuzzycocopython/actions/workflows/build.yml)
-[![Coverage](https://raw.githubusercontent.com/Lonza-RND-Data-Science/fuzzycocopython/main/badges/coverage.svg)](https://Lonza-RND-Data-Science.github.io/fuzzycocopython/coverage/)
-[![PyPI](https://img.shields.io/badge/PyPI-pending-lightgrey)](https://pypi.org/project/fuzzycocopython/)
+[![Tests](https://github.com/CI4CB-lab/fuzzycocopython/actions/workflows/tests.yml/badge.svg)](https://github.com/CI4CB-lab/fuzzycocopython/actions/workflows/tests.yml)
+[![Build](https://github.com/CI4CB-lab/fuzzycocopython/actions/workflows/build.yml/badge.svg)](https://github.com/CI4CB-lab/fuzzycocopython/actions/workflows/build.yml)
+[![Coverage](https://raw.githubusercontent.com/CI4CB-lab/fuzzycocopython/main/badges/coverage.svg)](https://CI4CB-lab.github.io/fuzzycocopython/coverage/)
+[![PyPI](https://img.shields.io/pypi/v/fuzzycocopython)](https://pypi.org/project/fuzzycocopython/)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-success)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python Versions](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue)](#installation)
 
-[Documentation](https://Lonza-RND-Data-Science.github.io/fuzzycocopython/)
+[Documentation](https://CI4CB-lab.github.io/fuzzycocopython/)
 
 
-Python bindings and scikit-learn style estimators for [fuzzycoco](https://github.com/Lonza-RND-Data-Science/fuzzycoco),
+Python bindings and scikit-learn style estimators for [fuzzycoco](https://github.com/CI4CB-lab/fuzzycoco),
 an evolutionary fuzzy rule learning engine written in C++. This package wraps the C++ core as a Python module
 and exposes `FuzzyCocoClassifier` and `FuzzyCocoRegressor` with a familiar fit/predict API.
 
@@ -22,7 +22,13 @@ and exposes `FuzzyCocoClassifier` and `FuzzyCocoRegressor` with a familiar fit/p
 
 ## Installation
 
-This package is not yet on PyPI; install it from source. Make sure the following prerequisites are available:
+Install from PyPI:
+
+```bash
+pip install fuzzycocopython
+```
+
+Or install from source. Make sure the following prerequisites are available:
 
 - A C++17 compiler toolchain (GCC/Clang on Linux & macOS, MSVC on Windows)
 - [CMake](https://cmake.org/) ≥ 3.21 and [Ninja](https://ninja-build.org/) on your PATH
@@ -31,7 +37,7 @@ This package is not yet on PyPI; install it from source. Make sure the following
 Clone the repository, initialise the `fuzzycoco` submodule, then build and install in editable mode with uv:
 
 ```bash
-git clone https://github.com/Lonza-RND-Data-Science/fuzzycocopython.git
+git clone https://github.com/CI4CB-lab/fuzzycocopython.git
 cd fuzzycocopython
 git submodule update --init --recursive
 
@@ -53,7 +59,7 @@ pip install -e .
 When you only need the published bindings and not the repository, install straight from GitHub:
 
 ```bash
-pip install git+https://github.com/Lonza-RND-Data-Science/fuzzycocopython.git
+pip install git+https://github.com/CI4CB-lab/fuzzycocopython.git
 ```
 
 For development tasks (tests, linting, docs) install the optional toolchain:
@@ -63,7 +69,7 @@ uv pip install -e '.[dev]'
 ```
 
 The build compiles the bundled C++ bindings. Refer to the
-[`fuzzycoco` project](https://github.com/Lonza-RND-Data-Science/fuzzycoco) for background on the engine itself.
+[`fuzzycoco` project](https://github.com/CI4CB-lab/fuzzycoco) for background on the engine itself.
 
 ## Quick start
 
@@ -99,7 +105,7 @@ For a guided tour, open `demo.ipynb`. Additional usage examples live in `tests/t
 
 ## Documentation
 
-Full API documentation is available at [Lonza-RND-Data-Science.github.io/fuzzycocopython](https://Lonza-RND-Data-Science.github.io/fuzzycocopython/).
+Full API documentation is available at [CI4CB-lab.github.io/fuzzycocopython](https://CI4CB-lab.github.io/fuzzycocopython/).
 To build the docs locally run:
 
 ```bash
