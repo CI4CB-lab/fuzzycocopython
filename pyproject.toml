@@ -26,7 +26,7 @@ dependencies = [
     "numpy",
     "scikit-learn>=1.1.3",
     "pandas>2.0",
-    "lfa_toolbox @ git+https://github.com/arthurbabey/lfa_toolbox.git@master",
+    "lfa-toolbox-v2",
     "joblib",
 ]
 
