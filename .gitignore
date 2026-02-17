@@ -37,6 +37,7 @@ pip-delete-this-directory.txt
 # Dependency / environment management
 .env
 .venv
+uv.lock
 env/
 venv/
 ENV/
