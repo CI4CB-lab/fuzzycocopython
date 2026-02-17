@@ -17,31 +17,25 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Set up uv with Python
-        uses: astral-sh/setup-uv@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-          activate-environment: true
-
-      - name: Install build dependencies
-        run: uv pip install build ninja cmake
-
-      - name: Build wheel
-        run: |
-          uv run python -c "import shutil; shutil.rmtree('wheelhouse', ignore_errors=True)"
-          uv run python -m build --wheel --outdir wheelhouse
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2
+        env:
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_ARCHS_MACOS: arm64
+          CIBW_ARCHS_WINDOWS: AMD64
+          CIBW_BEFORE_BUILD: pip install ninja cmake
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
 
   build-sdist:
