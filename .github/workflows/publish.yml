@@ -77,9 +77,8 @@ jobs:
     needs:
       - build-wheels
       - build-sdist
-    environment: pypi
     permissions:
-      id-token: write
+      contents: read
     steps:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
