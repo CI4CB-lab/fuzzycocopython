@@ -190,8 +190,34 @@ class _FuzzyCocoBase(BaseEstimator):
         threshold : float, default=0.5
             Default singleton defuzzification threshold applied to each output.
         metrics_weights : dict[str, float] | None, optional
-            Mapping of fitness metrics to weights. A sensible default is provided
-            by the classifier/regressor subclasses when omitted.
+            Mapping of fitness metric names to weights. A sensible default is
+            provided by the classifier/regressor subclasses when omitted.
+            All unspecified metrics are set to ``0.0``; unknown keys raise
+            ``ValueError``.
+
+            Valid keys:
+
+            - ``"sensitivity"``       — true positive rate: TP / (TP + FN)
+            - ``"specificity"``       — true negative rate: TN / (TN + FP)
+            - ``"accuracy"``          — (TP + TN) / (TP + TN + FP + FN)
+            - ``"ppv"``               — precision: TP / (TP + FP)
+            - ``"rmse"``              — root mean square error
+            - ``"rrse"``              — root relative squared error
+            - ``"rae"``               — relative absolute error
+            - ``"mse"``               — mean squared error
+            - ``"distanceThreshold"`` — normalised aggregate distance to the
+              defuzzification threshold for correctly classified samples
+            - ``"distanceMinThreshold"`` — average minimum per-sample distance
+              to the threshold for correctly classified samples (confidence proxy)
+            - ``"nb_vars"``           — complexity penalty: 1 / nb_vars where
+              *nb_vars* is the total number of input variables used across all
+              rules; use to discourage overly complex systems
+            - ``"overLearn"``         — reserved, always 0 in the current engine;
+              setting this weight has no effect
+            - ``"true_positives"``    — raw TP count (not normalised)
+            - ``"false_positives"``   — raw FP count (not normalised)
+            - ``"true_negatives"``    — raw TN count (not normalised)
+            - ``"false_negatives"``   — raw FN count (not normalised)
         features_weights : dict[str, float] | None, optional
             Optional per-feature weights used by the underlying fitness function.
         random_state : int | RandomState | None, optional
