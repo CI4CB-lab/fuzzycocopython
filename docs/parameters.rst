@@ -72,6 +72,33 @@ FitnessParams
   All other known metrics are explicitly set to ``0.0`` so the engine does not fall back
   to its internal sensitivity/specificity defaults. Unknown metric names raise
   ``ValueError``.
+
+  Valid keys and what they measure:
+
+  ========================  =======================================================
+  Key                       Description
+  ========================  =======================================================
+  ``sensitivity``           True positive rate: ``TP / (TP + FN)``
+  ``specificity``           True negative rate: ``TN / (TN + FP)``
+  ``accuracy``              ``(TP + TN) / (TP + TN + FP + FN)``
+  ``ppv``                   Precision (positive predictive value): ``TP / (TP + FP)``
+  ``rmse``                  Root mean square error
+  ``rrse``                  Root relative squared error
+  ``rae``                   Relative absolute error
+  ``mse``                   Mean squared error
+  ``distanceThreshold``     Normalised aggregate distance to the defuzzification
+                            threshold for correctly classified samples
+  ``distanceMinThreshold``  Average minimum per-sample distance to the threshold
+                            for correctly classified samples (confidence proxy)
+  ``nb_vars``               Complexity penalty: ``1 / nb_vars`` where *nb_vars* is
+                            the total number of input variables used across all rules
+  ``overLearn``             Reserved — currently always 0; setting this weight has
+                            no effect
+  ``true_positives``        Raw TP count (not normalised; scales with dataset size)
+  ``false_positives``       Raw FP count (not normalised; scales with dataset size)
+  ``true_negatives``        Raw TN count (not normalised; scales with dataset size)
+  ``false_negatives``       Raw FN count (not normalised; scales with dataset size)
+  ========================  =======================================================
 - ``features_weights`` (default ``None``): optional per-feature weights used by the fitness
   function.
 
