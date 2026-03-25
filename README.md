@@ -6,6 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/fuzzycocopython)](https://pypi.org/project/fuzzycocopython/)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/license-AGPL--3.0--or--later-success)](https://www.gnu.org/licenses/agpl-3.0.html)
 [![Python Versions](https://img.shields.io/badge/python-3.10%20%E2%80%93%203.14-blue)](#installation)
+[![DOI](https://zenodo.org/badge/1067822104.svg)](https://doi.org/10.5281/zenodo.19221979)
 
 [Documentation](https://CI4CB-lab.github.io/fuzzycocopython/)
 
