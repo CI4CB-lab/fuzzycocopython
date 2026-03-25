@@ -51,15 +51,9 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           python-version: '3.10'
-          activate-environment: true
-
-      - name: Install build dependencies
-        run: uv pip install build
 
       - name: Build sdist
-        run: |
-          uv run python -c "import shutil; shutil.rmtree('dist', ignore_errors=True)"
-          uv run python -m build --sdist --outdir dist
+        run: uv build --sdist --out-dir dist
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v4
