@@ -514,8 +514,8 @@ class _FuzzyCocoBase(BaseEstimator):
         arr = check_array(raw, accept_sparse=False, ensure_2d=True, dtype=float)
         if arr.shape[1] != self.n_features_in_:
             raise ValueError(
-                f"X has {arr.shape[1]} features, but {self.__class__.__name__} \
-                    is expecting {self.n_features_in_} features as input",
+                f"X has {arr.shape[1]} features, but {self.__class__.__name__}"
+                f" is expecting {self.n_features_in_} features as input",
             )
 
         dfin = self._make_dataframe(arr, self.feature_names_in_)
